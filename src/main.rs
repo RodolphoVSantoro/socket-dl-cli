@@ -3,35 +3,50 @@ use tokio::net::TcpStream;
 
 use std::fs::File;
 use std::io::Write;
+use std::path::PathBuf;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), ()> {
     dotenvy::dotenv().ok();
     let env_map = dotenvy::vars().collect::<std::collections::HashMap<_, _>>();
     let file_name = env_map
         .get("FILE_NAME")
         .expect("FILE_NAME not found in .env");
-    let mut stream = TcpStream::connect("127.0.0.1:9999")
+
+    let default_out_dir = "./".to_string();
+    let out_dir = env_map.get("OUT_DIR").unwrap_or(&default_out_dir);
+    let file_path = PathBuf::from(out_dir).join(file_name);
+
+    let default_server_url = "127.0.0.1:9999".to_string();
+    let server_url = env_map.get("SERVER_URL").unwrap_or(&default_server_url);
+    let mut stream = TcpStream::connect(server_url)
         .await
         .expect("Failed to connect");
+
+    // Read chunk amount
+    let mut buffer = [0; 8];
     stream
         .write_all(&file_name.as_bytes())
         .await
         .expect("Failed to send data to server");
-    let mut out_file = File::create(&file_name).expect("Failed to create file");
-    let mut chunk = [0; 1024];
 
     let bytes_read = stream
-        .read(&mut chunk)
+        .read(&mut buffer)
         .await
         .expect("Failed to read data from server");
-    if bytes_read == 0 {
-        return Ok(());
+    if bytes_read < 8 {
+        println!("Err: Server did not send chunk amount");
+        return Err(());
     }
+    let chunk_amount = u64::from_be_bytes(buffer[..8].try_into().unwrap());
 
-    let chunk_amount = u64::from_be_bytes(chunk[..8].try_into().unwrap());
-    let mut chunks_read: u64 = 0;
     println!("Total chunks: {}", chunk_amount);
+
+    // Receive anb save file from server
+    let mut out_file = File::create(&file_path).expect("Failed to create file");
+    let mut chunk = [0; 1024];
+    let mut chunks_read: u64 = 0;
+    let mut total_bytes_read: u64 = 0;
 
     loop {
         let percent_update_limit = 30;
@@ -49,13 +64,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if bytes_read == 0 {
             break;
         }
+        total_bytes_read += bytes_read as u64;
         out_file
             .write_all(&chunk[..bytes_read])
             .expect("Failed to write data to file");
     }
-    out_file.flush().expect("Failed to flush file");
 
     println!("File {} downloaded successfully", file_name);
-    println!("Total chunks: {}", chunk_amount);
+    println!("{} chunks", chunk_amount);
+    println!("{} bytes", total_bytes_read);
+
     return Ok(());
 }
